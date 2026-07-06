@@ -48,8 +48,19 @@ for (j in 1:length(classes)) {
 }
 
 #Smooth out the functions using GCV? I need to find best gcv value
+loglambda <- seq(-7, 7, by = 1)
 
-
+for (ilam in 1:length(loglambda)){
+    lambda <- 10^loglambda[ilam]
+    fdparobj <- fdPar(basis, Lfdobj = 2, lambda = lambda)
+    total_gcv <- 0
+    total_df <- 0
+    
+    for (i in seq(1,length(dataset),by=1)){
+        smoothed_data_i <- smooth.basis(dataset[[i]]$t, dataset[[i]]$measurement, fdparobj)
+        
+    }
+}
 
 
 
