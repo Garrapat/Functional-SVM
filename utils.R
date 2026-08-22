@@ -185,7 +185,7 @@ train <- function(dataset, C, inner_product, eps= 1e-3) {
         score <- inner_product(w_fd, curve) + b
         ifelse(score < 0, -1, 1)
     }
-    return(list(w = w_fd, b = b, classifier = classifier))
+    return(list(w = w_fd, b = b, classifier = classifier, min_eig = min_eig,lambda = lambda_value, has_free_sv = any(lambda_value > 0 + eps & lambda_value < C - eps)))
 
 }
 
@@ -225,7 +225,7 @@ calculate_w <- function(basis, curves, labels, lambda_value) {
 #' @param Tolerance for lambda values default is 1e-3 used to take into account numerical error
 #' @return b parameter 
 calculate_b <- function(lambda_value, curves, labels, inner_product, w_fd, C, eps= 1e-3) {
-
+    
     lambda_star_indices <- which(lambda_value>0+eps & lambda_value < C-eps) #Select lambdas we use eps due to numerical error
         
     #Checks if there are free support vectors
@@ -239,7 +239,7 @@ calculate_b <- function(lambda_value, curves, labels, inner_product, w_fd, C, ep
         b_lower <- sapply(lower_indices, function(i) {(labels[i])-inner_product(w_fd,curves[[i]]$fd)})
 
         b = (min(b_upper) + max(b_lower))/2
-        print("No free support vectors found, check parameters. Still calculated b but not great")
+        print("No free support vectors found, check parameters. Still calculated b")
     }
     #if there are compute normally
     else {   
@@ -273,68 +273,6 @@ calculate_accuracy <- function(testing_data, predicted_labels) {
 
 
 
-
-
-#kernel attempt
-train_ker <- function(dataset, C, ker, eps= 1e-3) {
-    labels <- sapply(dataset,function(obj) obj$label) #List of labels from dataset
-    curves <- lapply(dataset, function(obj) obj$curve) #List of curves from dataset
-    basis <- curves[[1]]$fd$basis#Basis used across dataset
-    
-
-    K <- gram_matrix(curves, ker)
-    Q <- K * (labels %*% t(labels))
-
-    #Guarantee that Q is positive semidefinete to ensure convexity
-    eig_Q <- eigen(Q, symmetric = TRUE, only.values = TRUE)$values
-    min_eig <- min(eig_Q)
-    cat(" min eig ",min_eig)
-    if (min_eig < 0) {
-        Q <- Q + diag(abs(min_eig) + 1e-8, nrow(Q))
-    }
-
-
-    lambda <- Variable(length(dataset))
-
-    objective <- Maximize(sum(lambda)-(1/2)*quad_form(lambda, Q))
-    
-
-
-    constraints <- list(
-        lambda >= 0,
-        lambda <= C,
-        sum(lambda * labels) == 0
-    )
-
-    problem <- Problem(objective,constraints)
-
-    result <- solve(problem)
-    
-    lambda_value <- as.numeric(result$getValue(lambda))
-
-    #Find free support vectors
-    b <- calculate_b(lambda_value, curves, labels, ker, w_fd, C)
-
-    
-    
-    
-    scores_from_w <- sapply(seq_along(curves), function(i) {
-        ker(w_fd, curves[[i]]$fd) + b
-    })
-
-    scores_from_K <- as.vector((lambda_value * labels) %*% K) + b
-
-    cat(" error",max(abs(scores_from_w - scores_from_K)))
-
-
-    classifier <- function(curve) {
-        score <- ker(w_fd, curve) + b
-        ifelse(score < 0, -1, 1)
-    }
-    return(list(w = w_fd, b = b, classifier = classifier))
-
-}
-
 stratified_runif <- function(n_points, lower_bound = 0, upper_bound = 1) {
     t <- numeric(n_points)
     width <- (upper_bound - lower_bound) / n_points
@@ -351,4 +289,77 @@ stratified_runif <- function(n_points, lower_bound = 0, upper_bound = 1) {
     }
 
     return(t)
+}
+
+
+get_EFPCs <- function(dataset, variance_explained) {
+    # Put all functional observations temporarily into one fd object
+    coef_matrix <- do.call(
+        cbind,
+        lapply(dataset, function(x) x$curve$fd$coefs)
+    )
+    
+    fd_dataset <- fd(
+        coef = coef_matrix,
+        basisobj = dataset[[1]]$curve$fd$basis
+    )
+
+    # Maximum number of non-zero PCs determined by M(number of basis functions) and N(number of curves)
+    max_components <- min(
+        nrow(coef_matrix),
+        ncol(coef_matrix) - 1
+    )
+
+    # Compute FPCA on maximum number of components
+    pca <- pca.fd(
+        fd_dataset,
+        nharm = max_components
+    )
+
+    #find the number of components needed to explain the desired variance 
+    cumulative_variance <- cumsum(pca$varprop)
+    p <- which(cumulative_variance >= variance_explained)[1]
+    
+
+      return(list(
+        mean = pca$meanfd,
+        harmonics = pca$harmonics[1:p],
+        p = p,
+        varprop = pca$varprop[1:p],
+        cumulative_variance = cumulative_variance[1:p]
+    ))
+}
+
+project_to_EFPCs <- function(dataset, efpc_result, inner_product) {
+    reconstructed_dataset <- dataset # Initialize the reconstructed dataset with the original dataset
+    for (i in seq_along(dataset)) {
+        curve_fd <- dataset[[i]]$curve$fd
+        centered_fd <- fd(
+            coef = curve_fd$coefs - efpc_result$mean$coefs,
+            basisobj = curve_fd$basis
+        )
+        # Scores <X_i - mean, v_j>
+        scores <- numeric(efpc_result$p)
+
+        for (j in seq_len(efpc_result$p)) {
+
+            scores[j] <- L2_inner_product(
+                centered_fd,
+                efpc_result$harmonics[j]
+            )
+        }
+
+        # Reconstruct X_i using the first p EFPCs
+        reconstructed_coefs <-
+            efpc_result$mean$coefs + efpc_result$harmonics$coefs %*% scores
+
+        reconstructed_fd <- fd(
+            coef = as.numeric(reconstructed_coefs),
+            basisobj = efpc_result$harmonics$basis
+        )
+
+        # Replace ONLY the fd object
+        reconstructed_dataset[[i]]$curve$fd <- reconstructed_fd
+    }
+        return(reconstructed_dataset)
 }
